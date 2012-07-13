@@ -1,120 +1,82 @@
 'use strict';
 
+var TRUE = 'true';
+var FALSE = 'false';
+
 localStorage.ROUTE_SCHEMA = 'id,match,savePath';
 localStorage.SERVER_SCHEMA = 'id,url';
 
-if (!localStorage.routes) {
-    // First run after installation
-    localStorage.routes = JSON.stringify([{
-        id: '0',
-        match: '^file://[^/]*/',
-        savePath: '/'
-    }]);
-    localStorage.servers = JSON.stringify([{
-        id: '0',
-        url: 'http://127.0.0.1:9104'
-    }]);
-} else if (!localStorage.servers) {
-    // First run after updating to version 1.x
-    (function migrateRules() {
-        var routes = JSON.parse(localStorage.routes);
-        var endsWithSave = /\/save$/;
-        var servers = [];
-        var serversSet = {};
-        var id = 0;
-        for (var i = 0, ii = routes.length; i < ii; i++) {
-            var route = routes[i];
-            var updatedTo = route.to.replace(endsWithSave, '');
-            if (serversSet.hasOwnProperty(updatedTo)) {
-                route.id = serversSet[updatedTo];
-            } else {
-                serversSet[updatedTo] = route.id = id.toString();
-                servers.push({url: updatedTo, id: id.toString()});
-                id++;
+var souptools = {};
+
+(function(tools) {
+
+    var tag2attr = {
+        a       : 'href',
+        img     : 'src',
+        form    : 'action',
+        base    : 'href',
+        script  : 'src',
+        iframe  : 'src',
+        link    : 'href'
+    },
+
+    key = ["source","protocol","authority","userInfo","user","password","host","port","relative","path","directory","file","query","fragment"], // keys available to query
+
+    aliases = { "anchor" : "fragment" }, // aliases for backwards compatability
+
+    parser = {
+        strict  : /^(?:([^:\/?#]+):)?(?:\/\/((?:(([^:@]*):?([^:@]*))?@)?([^:\/?#]*)(?::(\d*))?))?((((?:[^?#\/]*\/)*)([^?#]*))(?:\?([^#]*))?(?:#(.*))?)/,  //less intuitive, more accurate to the specs
+        loose   :  /^(?:(?![^:@]+:[^:@\/]*@)([^:\/?#.]+):)?(?:\/\/)?((?:(([^:@]*):?([^:@]*))?@)?([^:\/?#]*)(?::(\d*))?)(((\/(?:[^?#](?![^?#\/]*\.[^?#\/.]+(?:[?#]|$)))*\/?)?([^?#\/]*))(?:\?([^#]*))?(?:#(.*))?)/ // more intuitive, fails on relative paths and deviates from specs
+    },
+
+    querystring_parser = /(?:^|&|;)([^&=;]*)=?([^&;]*)/g, // supports both ampersand and semicolon-delimted query string key/value pairs
+
+    fragment_parser = /(?:^|&|;)([^&=;]*)=?([^&;]*)/g; // supports both ampersand and semicolon-delimted fragment key/value pairs
+
+    tools.parseUri = function(url, strictMode)
+    {
+        var str = decodeURI( url ),
+            res   = parser[ strictMode || false ? "strict" : "loose" ].exec( str ),
+            uri = { attr : {}, param : {}, seg : {} },
+            i   = 14;
+
+        while ( i-- )
+        {
+            uri.attr[ key[i] ] = res[i] || "";
+        }
+
+        // build query and fragment parameters
+
+        uri.param['query'] = {};
+        uri.param['fragment'] = {};
+
+        uri.attr['query'].replace( querystring_parser, function ( $0, $1, $2 ){
+            if ($1)
+            {
+                uri.param['query'][$1] = $2;
             }
-            delete route.stylesheet;
-            delete route.script;
-            delete route.document;
-            delete route.to;
-        }
-        localStorage.servers = JSON.stringify(servers);
-        localStorage.routes = JSON.stringify(routes);
-    })();
-}
+        });
 
-/**
- * @nosideeffects
- * @return Array
- */
-function getRoutes() {
-    var json = localStorage.routes;
-    if (!json) {
-        return [];
-    }
-    var requiredFields = localStorage.ROUTE_SCHEMA.split(',');
-    var routes = JSON.parse(json);
-    OUTER: for (var i = routes.length; i--;) {
-        var route = routes[i];
-        for (var j = requiredFields.length; j--;) {
-            if (!route[requiredFields[j]]) {
-                routes.splice(i, 1);
-                continue OUTER;
+        uri.attr['fragment'].replace( fragment_parser, function ( $0, $1, $2 ){
+            if ($1)
+            {
+                uri.param['fragment'][$1] = $2;
             }
-        }
-        route.match = new RegExp(route.match);
-    }
-    return routes;
-}
+        });
 
-/**
- * @nosideeffects
- * @return Array
- */
-function getServers() {
-    return localStorage.servers ? JSON.parse(localStorage.servers) : [];
-}
+        // split path and fragement into segments
 
-/**
- * @param {Object} request
- * @nosideeffects
- * @return Object
- */
-function getBackend(request) {
-    var routes = getRoutes();
-    for (var i = 0; i < routes.length; i++) {
-        var route = routes[i];
-        if (!route.match.test(request.url)) {
-            continue;
-        }
-        var servers = getServers();
-        for (i = 0; i < servers.length; i++) {
-            if (servers[i].id === route.id) {
-                return {
-                    serverURL: servers[i].url,
-                    savePath: urlToPath(request.url.replace(route.match, route.savePath))
-                };
-            }
-        }
-    }
-    return null;
-}
+        uri.seg['path'] = uri.attr.path.replace(/^\/+|\/+$/g,'').split('/');
 
-/**
- * @param {string} url
- * @nosideeffects
- * @return {string}
- */
-function urlToPath(url) {
-    var queryIndex = url.indexOf('?');
-    if (queryIndex !== -1) {
-        url = url.slice(0, queryIndex);
-    }
-    if (/^\/[C-Z]:\//.test(url)) {
-        // Oh, Windows.
-        url = url.slice(1);
-    }
-    return decodeURIComponent(url);
-}
+        uri.seg['fragment'] = uri.attr.fragment.replace(/^\/+|\/+$/g,'').split('/');
+
+        // compile a 'base' domain attribute
+
+        uri.attr['base'] = uri.attr.host ? uri.attr.protocol+"://"+uri.attr.host + (uri.attr.port ? ":"+uri.attr.port : '') : '';
+
+        return uri;
+    };
+})(souptools);
 
 /**
  * @param {number} major
@@ -129,70 +91,161 @@ function versionPair(major, minor) {
         toString: function() {
             return this.major + '.' + this.minor;
         }
-    }
+    };
 }
+
+function get_remote_call(url) {
+
+    var uri = souptools.parseUri(url, true);
+
+    if (uri.attr.authority === 'chrome') {
+
+        return;
+    }
+
+    var server = uri['attr']['base'];
+
+    server += '/__rocker_ping';
+
+    return server
+
+}
+
 
 var protocolVersion = versionPair(1, 0);
 
-/**
- * @param {Object} request
- */
-function sendToBackend(request) {
-    var xhrHandshake = new XMLHttpRequest();
-    xhrHandshake.open('GET', request.url, true);
+function pingRocker(tabId, changeInfo, tab) {
+
+    chrome.browserAction.setIcon({path:'icon_inactive_19.png'});
+
+    window.localStorage.setItem('editable',FALSE)
+
+    chrome.browserAction.setBadgeText({text:''});
+
+    var server = get_remote_call(tab.url);
+
+    var request = new XMLHttpRequest();
+
+    request.onreadystatechange = function (){
+
+        if (request.readyState == 4) {
+
+            if(request.status === 0) {
+
+                return;
+
+            } else if(request.status == 404) {
+
+                return;
+
+            } else if(request.status == 200) {
+
+                chrome.browserAction.setIcon({path:'icon_19.png'});
+
+                window.localStorage.setItem('editable',TRUE);
+
+                if (window.localStorage.getItem('record') == TRUE) {
+
+                    chrome.browserAction.setBadgeText({text:'REC'});
+
+                }
+
+                else {
+
+                    chrome.browserAction.setBadgeText({text:''});
+
+                }
+
+                return;
+
+            }
+
+        }
+
+    };
 
     function onError(event) {
-        var error;
-        if (event.target.status == 0) {
-            error = 'Autosave Server doesn’t run on ' + request.url;
-        } else if (event.target.status >= 300) {
-            error = event.target.responseText;
-        }
-        if (error) {
-            webkitNotifications.createNotification('', '', error).show();
-        }
-        return error;
+        return null;
     }
 
-    xhrHandshake.onerror = onError;
-
-    xhrHandshake.onload = function(event) {
+    request.onload = function(event) {
         if (onError(event)) {
             return;
         }
-        var versionMatch = xhrHandshake.responseText.match(/DevTools Autosave (\d+)\.(\d+)/);
-        var serverVersion = versionPair(versionMatch[1], versionMatch[2]);
-        if (serverVersion.major !== protocolVersion.major) {
-            var error = 'Cannot save. ';
-            if (serverVersion.major < protocolVersion.major) {
-                error += 'Autosave Server ' + serverVersion + ' is out of date. Update it by running `npm install -g autosave@' + protocolVersion + '` in the terminal.';
-            } else {
-                error += 'You’re using an old version of DevTools Autosave extension (' + protocolVersion[0] + '.x) that is incompatible with Autosave Server ' + serverVersion + '.';
-            }
-            webkitNotifications.createNotification('', '', error).show();
-            console.error(error);
-            return;
-        } else if (serverVersion.minor !== protocolVersion.minor) {
-            if (serverVersion.minor < protocolVersion.minor) {
-                console.info('Autosave Server is using a slightly older version of Autosave protocol (' + serverVersion + ') than Chrome DevTools Autosave (' + protocolVersion + '). You might want to update the server by running `npm install -g autosave@' + protocolVersion + '` in the terminal.');
-            } else {
-                console.info('DevTools Autosave extension is using a slightly older version of Autosave protocol (' + protocolVersion  + ') than Autosave Server (' + serverVersion + '). You might want to update the extension.');
-            }
-        }
+    };
+
+    request.onerror = onError;
+
+    request.open('GET', server, true);
+
+    try {
+        request.send();
+    }
+
+    catch (e) {
+        console.log('boo');
+        return;
+    }
+}
+
+
+function toggleRecord(info) {
+
+    if (window.localStorage.getItem('editable') == FALSE) {
+
+        chrome.browserAction.setBadgeText({text:''});
+
+        return;
+    }
+
+    if (window.localStorage.getItem('record') == FALSE) {
+
+        chrome.browserAction.setBadgeText({text:'REC'});
+
+        window.localStorage.setItem('record', TRUE);
+
+    }
+
+    else {
+
+        chrome.browserAction.setBadgeText({text:''});
+
+        window.localStorage.setItem('record', FALSE);
+
+    }
+
+}
+
+function sendToBackend(request) {
+
+    var xhrHandshake = new XMLHttpRequest();
+
+    var server = get_remote_call(request.url);
+
+    xhrHandshake.open('GET', server, true);
+
+    xhrHandshake.onload = function(event) {
+
         var xhr = new XMLHttpRequest();
-        xhr.open('POST', request.url, true);
-        xhr.setRequestHeader('x-autosave-version', protocolVersion.toString());
+
+        xhr.open('POST', server, true);
+
+        xhr.setRequestHeader('x-autosave-version', '0.1');
+
         var headers = request.headers;
+
         for (var key in headers) {
+
             xhr.setRequestHeader(key, headers[key]);
+
         }
-        xhr.onload = xhr.onerror = onError;
+
         xhr.send(request.content);
+
     };
 
     xhrHandshake.send(null);
 }
-
 
 /**
  * @param {Object} request
@@ -200,13 +253,39 @@ function sendToBackend(request) {
  * @param {Function} sendResponse
  */
 function onRequest(request, sender, sendResponse) {
+
     if (request.method == 'getBackend') {
-        sendResponse(getBackend(request));
+
+        sendResponse(request);
+
     } else if (request.method == 'send') {
+
         sendToBackend(request);
+
     }
+
 }
 
+window.localStorage.setItem('record', FALSE);
+
+window.localStorage.setItem('editable', FALSE);
+
+chrome.browserAction.setIcon({path:'icon_inactive_19.png'});
 
 chrome.extension.onRequest.addListener(onRequest);
+
 chrome.extension.onRequestExternal.addListener(onRequest);
+
+chrome.tabs.onUpdated.addListener(pingRocker);
+
+chrome.tabs.onActivated.addListener(function(info) {
+
+    chrome.tabs.get(info.tabId, function(tabId) {
+
+        pingRocker(tabId.id, null, tabId);
+
+    });
+
+});
+
+chrome.browserAction.onClicked.addListener(toggleRecord);

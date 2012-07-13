@@ -15,10 +15,16 @@
         "128": "icon_128.png"
     },
 
+    "browser_action": {
+        "default_icon": "icon_19.png"
+    },
+
     "permissions": [
         "experimental",
         "notifications",
-        "http://*/"
+        "http://*/*",
+        "https://*/*",
+        "tabs"
     ],
 
     "update_url": "http://userscripts.ru/js/chrome-devtools-autosave/update.xml",
